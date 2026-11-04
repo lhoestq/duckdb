@@ -335,9 +335,11 @@ private:
 	std::shared_ptr<duckdb_apache::thrift::protocol::TProtocol> protocol;
 	duckdb_parquet::FileMetaData file_meta_data;
 	std::mutex lock;
-	//! With content-defined chunking, held while a row group is prepared and written, so the chunker sees row groups
-	//! one at a time and in file order
-	std::mutex cdc_lock;
+#ifndef NDEBUG
+	//! Flush() with content-defined chunking must not be entered by two threads at once - the chunker state carries
+	//! over from one row group to the next. Debug builds assert this; see ParquetWriter::Flush
+	std::atomic<bool> cdc_flush_active {false};
+#endif
 
 	vector<unique_ptr<ColumnWriter>> column_writers;
 

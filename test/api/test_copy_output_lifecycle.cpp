@@ -161,11 +161,11 @@ void LifecycleCopyGetStatistics(ClientContext &, FunctionData &, GlobalFunctionD
 	statistics.footer_size_bytes = Value();
 }
 
-CopyFunctionExecutionMode LifecycleRegularExecutionMode(bool, bool) {
+CopyFunctionExecutionMode LifecycleRegularExecutionMode(bool, bool, const FunctionData &) {
 	return CopyFunctionExecutionMode::REGULAR_COPY_TO_FILE;
 }
 
-CopyFunctionExecutionMode LifecycleBatchExecutionMode(bool, bool) {
+CopyFunctionExecutionMode LifecycleBatchExecutionMode(bool, bool, const FunctionData &) {
 	return CopyFunctionExecutionMode::BATCH_COPY_TO_FILE;
 }
 

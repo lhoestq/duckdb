@@ -36,7 +36,8 @@ PhysicalOperator &PhysicalPlanGenerator::CreatePlan(LogicalCopyToFile &op, Physi
 	}
 	auto mode = CopyFunctionExecutionMode::REGULAR_COPY_TO_FILE;
 	if (op.function.execution_mode) {
-		mode = op.function.execution_mode(preserve_insertion_order, supports_batch_index);
+		D_ASSERT(op.bind_data);
+		mode = op.function.execution_mode(preserve_insertion_order, supports_batch_index, *op.bind_data);
 	}
 	if (mode == CopyFunctionExecutionMode::BATCH_COPY_TO_FILE) {
 		if (!supports_batch_index) {

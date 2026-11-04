@@ -157,7 +157,8 @@ typedef unique_ptr<FunctionData> (*copy_to_deserialize_t)(Deserializer &deserial
 typedef unique_ptr<FunctionData> (*copy_from_bind_t)(ClientContext &context, CopyFromFunctionBindInput &info,
                                                      vector<Identifier> &expected_names,
                                                      vector<LogicalType> &expected_types);
-typedef CopyFunctionExecutionMode (*copy_to_execution_mode_t)(bool preserve_insertion_order, bool supports_batch_index);
+typedef CopyFunctionExecutionMode (*copy_to_execution_mode_t)(bool preserve_insertion_order, bool supports_batch_index,
+                                                              const FunctionData &bind_data);
 
 typedef unique_ptr<PreparedBatchData> (*copy_prepare_batch_t)(ClientContext &context, FunctionData &bind_data,
                                                               GlobalFunctionData &gstate,

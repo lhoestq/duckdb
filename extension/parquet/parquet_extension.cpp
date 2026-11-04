@@ -67,6 +67,7 @@
 #include "duckdb/common/unique_ptr.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/execution/execution_context.hpp"
+#include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/function/function.hpp"
 #include "duckdb/function/function_set.hpp"
 #include "duckdb/function/replacement_scan.hpp"
@@ -997,7 +998,16 @@ static unique_ptr<FunctionData> ParquetCopyDeserialize(Deserializer &deserialize
 //===--------------------------------------------------------------------===//
 // Execution Mode
 //===--------------------------------------------------------------------===//
-static CopyFunctionExecutionMode ParquetWriteExecutionMode(bool preserve_insertion_order, bool supports_batch_index) {
+static CopyFunctionExecutionMode ParquetWriteExecutionMode(bool preserve_insertion_order, bool supports_batch_index,
+                                                           const FunctionData &bind_data) {
+	auto &parquet_bind = bind_data.Cast<ParquetWriteBindData>();
+	if (parquet_bind.content_defined_chunking) {
+		// Content-defined page boundaries are only reproducible across runs when rows reach the chunker in a fixed
+		// order, so CDC copies always run ordered: in batch mode when the input supports batch indexes, otherwise
+		// through a single-threaded writer. This overrides preserve_insertion_order=false on purpose.
+		return supports_batch_index ? CopyFunctionExecutionMode::BATCH_COPY_TO_FILE
+		                            : CopyFunctionExecutionMode::REGULAR_COPY_TO_FILE;
+	}
 	if (!preserve_insertion_order) {
 		return CopyFunctionExecutionMode::PARALLEL_COPY_TO_FILE;
 	}
@@ -1012,6 +1022,14 @@ static CopyFunctionExecutionMode ParquetWriteExecutionMode(bool preserve_inserti
 static void ParquetWriteInitializeOperator(GlobalFunctionData &gstate, const PhysicalOperator &op) {
 	auto &global_state = gstate.Cast<ParquetWriteGlobalState>();
 	global_state.op = &op;
+	if (global_state.writer && global_state.writer->ContentDefinedChunking() &&
+	    op.type == PhysicalOperatorType::COPY_TO_FILE) {
+		auto &copy = op.Cast<PhysicalCopyToFile>();
+		if (copy.per_thread_output || copy.partition_output || !copy.partition_columns.empty()) {
+			throw InvalidInputException(
+			    "CONTENT_DEFINED_CHUNKING cannot be combined with PER_THREAD_OUTPUT or PARTITION_BY");
+		}
+	}
 }
 //===--------------------------------------------------------------------===//
 // Prepare Batch
@@ -1044,6 +1062,7 @@ static void ParquetWriteFlushBatch(ClientContext &context, FunctionData &bind_da
 	auto &global_state = gstate.Cast<ParquetWriteGlobalState>();
 	auto &batch = batch_p.Cast<ParquetWriteBatchData>();
 	if (batch.collection) {
+		D_ASSERT(global_state.writer->ContentDefinedChunking());
 		unique_ptr<ParquetWriteTransformData> transform_data;
 		global_state.writer->Flush(*batch.collection, transform_data);
 		return;

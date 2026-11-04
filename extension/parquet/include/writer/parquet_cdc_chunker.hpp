@@ -32,7 +32,7 @@ namespace duckdb {
 //! The hash is fed the column's values in Arrow's canonical form - the value's bytes, plus the two
 //! bytes of its definition level when the column is nullable - so a null is content too, exactly as
 //! it is there. Only the types in ParquetCdcSupportedType get that treatment; see that function for
-//! why the list stops where it does.
+//! why the list stops where it does. The port is Apache-2.0 licensed, like the original.
 
 //! Default for the minimum page size, matching Arrow's parquet::WriterProperties defaults
 static constexpr idx_t PARQUET_CDC_DEFAULT_MIN_CHUNK_SIZE = 256ULL * 1024ULL;
@@ -205,6 +205,7 @@ inline bool ParquetCdcSupportedType(const LogicalType &type) {
 	case LogicalTypeId::TIMESTAMP_MS:
 	case LogicalTypeId::TIMESTAMP_NS:
 	case LogicalTypeId::TIMESTAMP_TZ:
+	case LogicalTypeId::TIMESTAMP_TZ_NS:
 	case LogicalTypeId::VARCHAR:
 	case LogicalTypeId::BLOB:
 		return true;
@@ -260,6 +261,7 @@ inline void ParquetCdcHashValue(ParquetContentDefinedChunker &chunker, Vector &v
 	case LogicalTypeId::TIMESTAMP_MS:
 	case LogicalTypeId::TIMESTAMP_NS:
 	case LogicalTypeId::TIMESTAMP_TZ:
+	case LogicalTypeId::TIMESTAMP_TZ_NS:
 		// all of these are a single int64 under the hood, in their own unit, like Arrow's
 		chunker.RollFixedWidth(FlatVector::GetValue<int64_t>(vector, index));
 		return;

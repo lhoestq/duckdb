@@ -300,3 +300,132 @@ statement error
 copy (select 42 i) to '{TEST_DIR}/null_chunk.parquet' (format parquet, content_defined_chunking {min_chunk_size: null});
 ----
 cannot be NULL
+
+# content-defined chunking forces the copy ordered, session setting aside: with
+# preserve_insertion_order off, the same query written twice still gives the same bytes, because the
+# writer sees the row groups in file order either way. Without the forcing this writes through the
+# parallel unordered path, where the boundaries depend on which thread flushed first
+statement ok
+SET preserve_insertion_order=false;
+
+statement ok
+copy (select range i, repeat(md5(range::varchar), 4) s from range(50_000)) to '{TEST_DIR}/unordered_a.parquet' (format parquet, compression uncompressed, content_defined_chunking true);
+
+statement ok
+copy (select range i, repeat(md5(range::varchar), 4) s from range(50_000)) to '{TEST_DIR}/unordered_b.parquet' (format parquet, compression uncompressed, content_defined_chunking true);
+
+query I
+select hash(a.content) = hash(b.content)
+from read_blob('{TEST_DIR}/unordered_a.parquet') a, read_blob('{TEST_DIR}/unordered_b.parquet') b;
+----
+true
+
+# ... and the same bytes as the ordered write of the same query from the top of this file
+query I
+select hash(content) = (select hash(content) from read_blob('{TEST_DIR}/by_content.parquet'))
+from read_blob('{TEST_DIR}/unordered_a.parquet');
+----
+true
+
+# the row groups come out in input order, which the unordered parallel path cannot promise: with it
+# the per-row-group minimum of i is whatever row group happened to flush first
+statement ok
+copy (select range i from range(3_000_000)) to '{TEST_DIR}/unordered_order.parquet' (format parquet, content_defined_chunking true);
+
+query I
+select count(*)
+from (select stats_min_value::bigint m, lag(stats_min_value::bigint) over (order by row_group_id) prev
+      from parquet_metadata('{TEST_DIR}/unordered_order.parquet') where path_in_schema = 'i')
+where prev is not null and m < prev;
+----
+0
+
+# a query with no insertion order to begin with (hash aggregate) still gets a single writer feeding
+# the chunker: the round trip holds and the pages are still cut by content
+statement ok
+copy (select range % 200_000 g, count(*) c, sum(range) t from range(1_000_000) group by g) to '{TEST_DIR}/cdc_agg.parquet' (format parquet, compression uncompressed, content_defined_chunking {min_chunk_size: '64KB'});
+
+query I
+select count(*) from (
+	select * from '{TEST_DIR}/cdc_agg.parquet'
+	except all
+	select range % 200_000 g, count(*) c, sum(range) t from range(1_000_000) group by g);
+----
+0
+
+query I
+select cdc_pages('t', '{TEST_DIR}/cdc_agg.parquet') > 1;
+----
+true
+
+statement ok
+RESET preserve_insertion_order;
+
+# per-thread output and hive partitioning put rows into files and row groups by arrival, which no
+# amount of ordering at the writer can make reproducible, so CDC refuses them up front
+statement error
+copy (select range i from range(100)) to '{TEST_DIR}/cdc_per_thread.parquet' (format parquet, content_defined_chunking true, per_thread_output true);
+----
+cannot be combined
+
+statement error
+copy (select range i, range % 10 p from range(100)) to '{TEST_DIR}/cdc_partitioned.parquet' (format parquet, content_defined_chunking true, partition_by p);
+----
+cannot be combined
+
+# file rotation is not a problem: with the rotation decision taken where the writes are ordered, CDC
+# just writes one file at a time, and every file round trips
+statement ok
+copy (select range i, repeat(md5(range::varchar), 4) s from range(500_000)) to '{TEST_DIR}/cdc_rot' (format parquet, content_defined_chunking {min_chunk_size: '32KB'}, file_size_bytes 2_000_000);
+
+query I
+select count(*) > 1 from glob('{TEST_DIR}/cdc_rot/*.parquet');
+----
+true
+
+query I
+select count(*) from (
+	select * from '{TEST_DIR}/cdc_rot/*.parquet'
+	except all
+	select range i, repeat(md5(range::varchar), 4) s from range(500_000));
+----
+0
+
+# dictionary-encoded columns are cut by content too: a low-cardinality string column stays dictionary
+# encoded, and its index pages are pages like any other
+statement ok
+copy (select range i, case range % 5 when 0 then 'alpha' when 1 then 'beta' when 2 then 'gamma' when 3 then 'delta' else 'epsilon' end s from range(500_000)) to '{TEST_DIR}/dict_nocdc.parquet' (format parquet, compression uncompressed);
+
+statement ok
+copy (select range i, case range % 5 when 0 then 'alpha' when 1 then 'beta' when 2 then 'gamma' when 3 then 'delta' else 'epsilon' end s from range(500_000)) to '{TEST_DIR}/dict_cdc.parquet' (format parquet, compression uncompressed, content_defined_chunking {min_chunk_size: 16384, max_chunk_size: 32768});
+
+query I
+select cdc_pages('s', '{TEST_DIR}/dict_cdc.parquet') > 10 and cdc_pages('s', '{TEST_DIR}/dict_cdc.parquet') > cdc_pages('s', '{TEST_DIR}/dict_nocdc.parquet') * 5;
+----
+true
+
+query I
+select count(*) from (
+	select * from '{TEST_DIR}/dict_cdc.parquet'
+	except all
+	select range i, case range % 5 when 0 then 'alpha' when 1 then 'beta' when 2 then 'gamma' when 3 then 'delta' else 'epsilon' end s from range(500_000));
+----
+0
+
+# the fixed-width types CDC hashes all cut pages and round trip: boolean as a bitstream, the
+# timestamps each as their own int64 unit
+statement ok
+copy (select range i, range % 2 = 0 b, make_timestamp(range) t, make_timestamp_ns(range) tn, cast(make_timestamp(range) as timestamptz) ttz from range(2_000_000)) to '{TEST_DIR}/cdc_types.parquet' (format parquet, compression uncompressed, content_defined_chunking {min_chunk_size: '64KB'});
+
+query I
+select cdc_pages('b', '{TEST_DIR}/cdc_types.parquet') > 1 and cdc_pages('t', '{TEST_DIR}/cdc_types.parquet') > 1 and cdc_pages('tn', '{TEST_DIR}/cdc_types.parquet') > 1 and cdc_pages('ttz', '{TEST_DIR}/cdc_types.parquet') > 1;
+----
+true
+
+query I
+select count(*) from (
+	select * from '{TEST_DIR}/cdc_types.parquet'
+	except all
+	select range i, range % 2 = 0 b, make_timestamp(range) t, make_timestamp_ns(range) tn, cast(make_timestamp(range) as timestamptz) ttz from range(2_000_000));
+----
+0

@@ -378,7 +378,8 @@ void WriteCSVFinalize(ClientContext &context, FunctionData &bind_data, GlobalFun
 //===--------------------------------------------------------------------===//
 // Execution Mode
 //===--------------------------------------------------------------------===//
-CopyFunctionExecutionMode WriteCSVExecutionMode(bool preserve_insertion_order, bool supports_batch_index) {
+CopyFunctionExecutionMode WriteCSVExecutionMode(bool preserve_insertion_order, bool supports_batch_index,
+                                                const FunctionData &bind_data) {
 	if (!preserve_insertion_order) {
 		return CopyFunctionExecutionMode::PARALLEL_COPY_TO_FILE;
 	}

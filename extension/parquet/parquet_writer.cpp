@@ -883,14 +883,39 @@ void ParquetWriter::FlushRowGroup(PreparedRowGroup &prepared) {
 	batch_guard.Finish();
 }
 
+#ifndef NDEBUG
+namespace {
+//! Asserts that ParquetWriter::Flush is not entered concurrently while content-defined chunking is on
+class ContentDefinedFlushAssert {
+public:
+	explicit ContentDefinedFlushAssert(std::atomic<bool> &active_p) : active(active_p) {
+		bool expected = false;
+		D_ASSERT(active.compare_exchange_strong(expected, true));
+	}
+	~ContentDefinedFlushAssert() {
+		active = false;
+	}
+
+private:
+	std::atomic<bool> &active;
+};
+} // namespace
+#endif
+
 void ParquetWriter::Flush(ColumnDataCollection &buffer, unique_ptr<ParquetWriteTransformData> &transform_data) {
 	if (buffer.Count() == 0) {
 		return;
 	}
-	unique_lock<std::mutex> cdc_guard;
+	// With content-defined chunking the chunker state carries over from row group to row group, so callers must not
+	// enter Flush concurrently, and must feed it row groups in file order. All in-tree callers satisfy this: batch
+	// mode flushes under its ordered flush lock, and the modes CDC forces (batch, or a single-threaded writer) do
+	// not run concurrent flushes. Debug builds assert the concurrency half of the contract.
+#ifndef NDEBUG
+	unique_ptr<ContentDefinedFlushAssert> cdc_guard;
 	if (ContentDefinedChunking()) {
-		cdc_guard = unique_lock<std::mutex>(cdc_lock);
+		cdc_guard = make_uniq<ContentDefinedFlushAssert>(cdc_flush_active);
 	}
+#endif
 
 	PreparedRowGroup prepared_row_group;
 	PrepareRowGroup(buffer, prepared_row_group, transform_data);
